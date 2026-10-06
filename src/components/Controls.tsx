@@ -4,7 +4,7 @@
 import { useState } from 'react';
 import { OBSERVING_SITES } from '../data/sites';
 import { DEMO_SCENARIOS } from '../data/scenarios';
-import type { FovConfig, SavedFov, Annotation, SiteState } from '../types';
+import type { CoveragePlan, FovConfig, SavedFov, Annotation, SiteState } from '../types';
 
 interface ControlsProps {
   site: SiteState;
@@ -16,6 +16,8 @@ interface ControlsProps {
   showGraticule: boolean;
   savedFovs: SavedFov[];
   annotations: Annotation[];
+  plans: CoveragePlan[];
+  activePlanId: string | null;
   onChangeSite: (site: SiteState) => void;
   onChangeTime: (iso: string) => void;
   onChangeFov: (fov: FovConfig) => void;
@@ -29,16 +31,24 @@ interface ControlsProps {
   onDeleteFov: (uuid: string) => void;
   onAddAnnotation: (text: string, color: string) => void;
   onDeleteAnnotation: (uuid: string) => void;
+  onCreatePlan: (name: string) => void;
+  onSelectPlan: (uuid: string | null) => void;
+  onDeletePlan: (uuid: string) => void;
+  /** 把某个已保存视场加入/移出当前激活规划 */
+  onTogglePlanFov: (fovUuid: string) => void;
 }
 
 export default function Controls(p: ControlsProps) {
   const [fovName, setFovName] = useState('');
   const [noteText, setNoteText] = useState('');
   const [noteColor, setNoteColor] = useState('#ffd54a');
+  const [planName, setPlanName] = useState('');
 
   const setRa = (v: number) => p.onChangeFov({ ...p.fov, centerRa: ((v % 360) + 360) % 360 });
   const setDec = (v: number) => p.onChangeFov({ ...p.fov, centerDec: Math.max(-90, Math.min(90, v)) });
   const setRadius = (v: number) => p.onChangeFov({ ...p.fov, radiusDeg: Math.max(1, Math.min(90, v)) });
+
+  const activePlan = p.plans.find((pl) => pl.uuid === p.activePlanId) ?? null;
 
   return (
     <div className="controls">
@@ -118,15 +128,63 @@ export default function Controls(p: ControlsProps) {
         </div>
         {p.savedFovs.length > 0 && (
           <ul className="store-list">
-            {p.savedFovs.slice(0, 6).map((f) => (
-              <li key={f.uuid}>
-                <button className="link-btn" title={`RA ${f.fov.centerRa.toFixed(1)}° Dec ${f.fov.centerDec.toFixed(1)}° r ${f.fov.radiusDeg}°`} onClick={() => p.onLoadFov(f)}>
-                  {f.name}
+            {p.savedFovs.slice(0, 6).map((f) => {
+              const inPlan = !!activePlan?.fovUuids.includes(f.uuid);
+              return (
+                <li key={f.uuid}>
+                  <button className="link-btn" title={`RA ${f.fov.centerRa.toFixed(1)}° Dec ${f.fov.centerDec.toFixed(1)}° r ${f.fov.radiusDeg}°`} onClick={() => p.onLoadFov(f)}>
+                    {f.name}
+                  </button>
+                  {activePlan && (
+                    <button
+                      className={'plan-toggle' + (inPlan ? ' in' : '')}
+                      title={inPlan ? '从当前覆盖规划移除（不删除此视场）' : '加入当前覆盖规划'}
+                      onClick={() => p.onTogglePlanFov(f.uuid)}
+                    >
+                      {inPlan ? '✓规划中' : '+规划'}
+                    </button>
+                  )}
+                  <button className="x-btn" title="删除已保存视场（规划引用会同步解除）" onClick={() => p.onDeleteFov(f.uuid)}>×</button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      <section className="ctl-block">
+        <h3>覆盖规划（多视场球面覆盖）</h3>
+        <div className="save-row">
+          <input placeholder="命名新规划，如：飞马-仙女大图…" value={planName} onChange={(e) => setPlanName(e.target.value)} />
+          <button
+            className="btn"
+            disabled={!planName.trim()}
+            onClick={() => {
+              p.onCreatePlan(planName.trim());
+              setPlanName('');
+            }}
+          >
+            新建规划
+          </button>
+        </div>
+        <p className="hint">规划只引用已保存视场；覆盖按球面角距逐目标计算，不拼接投影图片、不看像素。</p>
+        {p.plans.length > 0 && (
+          <ul className="store-list plan-list">
+            {p.plans.map((pl) => (
+              <li key={pl.uuid} className={pl.uuid === p.activePlanId ? 'active-plan' : ''}>
+                <button className="link-btn" title="在下方总览中打开此规划" onClick={() => p.onSelectPlan(pl.uuid === p.activePlanId ? null : pl.uuid)}>
+                  {pl.uuid === p.activePlanId ? '▸ ' : ''}{pl.name}（{pl.fovUuids.length} 视场）
                 </button>
-                <button className="x-btn" onClick={() => p.onDeleteFov(f.uuid)}>×</button>
+                <button className="x-btn" title="删除规划项（不删除已保存视场与批注）" onClick={() => p.onDeletePlan(pl.uuid)}>×</button>
               </li>
             ))}
           </ul>
+        )}
+        {activePlan && (
+          <p className="hint">
+            当前规划「{activePlan.name}」含 {activePlan.fovUuids.length} 个视场；在上方已保存视场列表点「+规划 / ✓规划中」增删。
+            移除规划项不会删除视场本身和批注。
+          </p>
         )}
       </section>
 

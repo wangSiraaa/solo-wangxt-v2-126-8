@@ -37,3 +37,15 @@ export interface Annotation {
   text: string;
   color: string;
 }
+
+/**
+ * 覆盖规划：一组已保存视场的【引用】集合（按 SavedFov.uuid）。
+ * 规划项只保存引用：从规划中移除一项不会删除已保存视场本身，
+ * 也不影响批注；删除已保存视场时才会反向清理引用。
+ */
+export interface CoveragePlan {
+  uuid: string;
+  name: string;
+  createdAt: number;
+  fovUuids: string[];
+}

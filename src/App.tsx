@@ -2,14 +2,23 @@
 // Three.js 显示三维天球，D3 geo 绘制两种方位投影，
 // astronomy-engine 完成其明确支持的坐标转换，IndexedDB 本地存视场与批注。
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import GlobeView from './components/GlobeView';
 import ProjectionView from './components/ProjectionView';
 import Controls from './components/Controls';
 import InfoPanel from './components/InfoPanel';
+import CoverageView from './components/CoverageView';
 import { SkyEpoch } from './lib/astronomy';
 import { computeSky, isTargetVisible, type SkyModel } from './lib/computeSky';
 import { fovBoundary } from './lib/geoMath';
+import {
+  computeCoverage,
+  coverageOverviewFrame,
+  PLAN_COLORS,
+  type CoverageTarget,
+  type PlannedFov
+} from './lib/coverage';
+import { STAR_CATALOG } from './data/catalog';
 import {
   buildExportJson,
   buildStandaloneSvg,
@@ -17,10 +26,20 @@ import {
   downloadText,
   type ExportMeta
 } from './lib/exporter';
-import { deleteAnnotation, deleteFov, getAllAnnotations, getAllFovs, putAnnotation, putFov } from './lib/db';
+import {
+  deleteAnnotation,
+  deleteFov,
+  deletePlan,
+  getAllAnnotations,
+  getAllFovs,
+  getAllPlans,
+  putAnnotation,
+  putFov,
+  putPlan
+} from './lib/db';
 import { DEMO_SCENARIOS } from './data/scenarios';
 import { OBSERVING_SITES } from './data/sites';
-import type { Annotation, FovConfig, SavedFov, SiteState } from './types';
+import type { Annotation, CoveragePlan, FovConfig, SavedFov, SiteState } from './types';
 
 const DEFAULT_SITE: SiteState = OBSERVING_SITES[0];
 const DEFAULT_TIME = '2026-09-30T13:00:00Z';
@@ -43,11 +62,21 @@ export default function App() {
   const [focusToken, setFocusToken] = useState<{ id: string; nonce: number } | null>(null);
   const [savedFovs, setSavedFovs] = useState<SavedFov[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [plans, setPlans] = useState<CoveragePlan[]>([]);
+  const [activePlanId, setActivePlanId] = useState<string | null>(null);
+  const [covMagLimit, setCovMagLimit] = useState(4.5);
 
   // 初始载入 IndexedDB
   useEffect(() => {
     getAllFovs().then(setSavedFovs).catch(() => undefined);
     getAllAnnotations().then(setAnnotations).catch(() => undefined);
+    getAllPlans()
+      .then((pl) => {
+        setPlans(pl);
+        // 自动激活最近一个规划，方便直接看到总览
+        if (pl.length > 0) setActivePlanId(pl[0].uuid);
+      })
+      .catch(() => undefined);
   }, []);
 
   // 历元（位置+时间）；SkyEpoch 内部调用 astronomy-engine 建旋转矩阵
@@ -104,8 +133,104 @@ export default function App() {
     };
     putFov(rec).then(() => getAllFovs().then(setSavedFovs));
   };
-  const removeFov = (id: string) => deleteFov(id).then(() => getAllFovs().then(setSavedFovs));
-  const loadFov = (f: SavedFov) => setFov({ ...f.fov });
+  const removeFov = (id: string) =>
+    deleteFov(id)
+      .then(() => Promise.all([getAllFovs().then(setSavedFovs), getAllPlans().then(setPlans)]));
+  // 载入已保存视场时同时回到保存时的台站与时刻（覆盖/批注锚点都在 J2000，不变）
+  const loadFov = (f: SavedFov) => {
+    setFov({ ...f.fov });
+    if (f.timeUtcIso) setTimeIso(f.timeUtcIso);
+    const st = OBSERVING_SITES.find((s) => s.id === f.siteId);
+    if (st) setSite({ ...st });
+  };
+
+  // ---------------- 覆盖规划 ----------------
+  const createPlan = (name: string) => {
+    const rec: CoveragePlan = { uuid: uuid(), name, createdAt: Date.now(), fovUuids: [] };
+    putPlan(rec).then(() => getAllPlans().then((pl) => {
+      setPlans(pl);
+      setActivePlanId(rec.uuid);
+    }));
+  };
+  const removePlan = (id: string) => {
+    // 仅删除 plans 库中的这条规划；fovs / annotations 不受影响
+    deletePlan(id).then(() => getAllPlans().then((pl) => {
+      setPlans(pl);
+      setActivePlanId((cur) => (cur === id ? null : cur));
+    }));
+  };
+  const togglePlanFov = (fovUuid: string) => {
+    const cur = plans.find((pl) => pl.uuid === activePlanId);
+    if (!cur) return;
+    const exists = cur.fovUuids.includes(fovUuid);
+    const next: CoveragePlan = {
+      ...cur,
+      fovUuids: exists ? cur.fovUuids.filter((u) => u !== fovUuid) : [...cur.fovUuids, fovUuid]
+    };
+    putPlan(next).then(() => getAllPlans().then(setPlans));
+  };
+
+  const activePlan = plans.find((pl) => pl.uuid === activePlanId) ?? null;
+
+  // 规划项 -> 解析到现存已保存视场（已删除的视场引用自然落空）；颜色只由规划内顺序决定
+  const plannedFovs: PlannedFov[] = useMemo(() => {
+    if (!activePlan) return [];
+    return activePlan.fovUuids
+      .map((u, i) => {
+        const saved = savedFovs.find((s) => s.uuid === u);
+        if (!saved) return null;
+        return { uuid: saved.uuid, name: saved.name, fov: { ...saved.fov }, color: PLAN_COLORS[i % PLAN_COLORS.length] } satisfies PlannedFov;
+      })
+      .filter((x): x is PlannedFov => x !== null);
+  }, [activePlan, savedFovs]);
+
+  // 覆盖统计用的内置目标：静态恒星 + 所选时刻的日月行星（动态）。
+  // 没有有效历元时退化为仅恒星。
+  const coverageTargets: CoverageTarget[] = useMemo(() => {
+    const stars: CoverageTarget[] = STAR_CATALOG.map((s) => ({
+      id: s.id,
+      name: s.name,
+      designation: s.designation,
+      ra: s.ra,
+      dec: s.dec,
+      mag: s.mag,
+      kind: 'star'
+    }));
+    const bodies: CoverageTarget[] = (sky?.targets ?? [])
+      .filter((t) => t.kind !== 'star')
+      .map((t) => ({ id: t.id, name: t.name, designation: t.designation, ra: t.ra, dec: t.dec, mag: t.mag, kind: t.kind }));
+    return [...stars, ...bodies];
+  }, [sky]);
+
+  // 纯球面覆盖结果：与投影、画布、缩放完全无关
+  const coverageResult = useMemo(
+    () => computeCoverage(coverageTargets, plannedFovs),
+    [coverageTargets, plannedFovs]
+  );
+  const overviewFrame = useMemo(() => coverageOverviewFrame(plannedFovs), [plannedFovs]);
+
+  // 从覆盖总览回到三视图：指定视场则载入该已保存视场，未覆盖目标则以目标为中心
+  const focusCoverageTarget = (t: CoverageTarget, fovUuid: string | null) => {
+    const r = coverageResult.perTarget.find((x) => x.target.id === t.id);
+    const ref = (fovUuid ? r?.coveredBy.find((c) => c.fov.uuid === fovUuid) : null) ?? r?.coveredBy[0] ?? null;
+    if (ref) {
+      const saved = savedFovs.find((s) => s.uuid === ref.fov.uuid);
+      if (saved) loadFov(saved);
+      else setFov({ ...ref.fov.fov });
+    } else {
+      setFov({ centerRa: t.ra, centerDec: t.dec, radiusDeg: Math.max(10, fov.radiusDeg) });
+    }
+    setSelectedId(t.id);
+    setFocusToken({ id: t.id, nonce: Date.now() });
+    threeViewScrollRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const focusCoverageFov = (f: PlannedFov) => {
+    const saved = savedFovs.find((s) => s.uuid === f.uuid);
+    if (saved) loadFov(saved);
+    else setFov({ ...f.fov });
+    threeViewScrollRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const threeViewScrollRef = useRef<HTMLDivElement>(null);
 
   // 批注
   const addAnnotation = (text: string, color: string) => {
@@ -185,6 +310,8 @@ export default function App() {
             showGraticule={showGraticule}
             savedFovs={savedFovs}
             annotations={annotations}
+            plans={plans}
+            activePlanId={activePlanId}
             onChangeSite={setSite}
             onChangeTime={setTimeIso}
             onChangeFov={setFov}
@@ -198,10 +325,14 @@ export default function App() {
             onDeleteFov={removeFov}
             onAddAnnotation={addAnnotation}
             onDeleteAnnotation={removeAnnotation}
+            onCreatePlan={createPlan}
+            onSelectPlan={setActivePlanId}
+            onDeletePlan={removePlan}
+            onTogglePlanFov={togglePlanFov}
           />
         </aside>
 
-        <main className="content">
+        <main className="content" ref={threeViewScrollRef}>
           {sky ? (
             <>
               <section className="view-row globe-section">
@@ -258,6 +389,32 @@ export default function App() {
             </>
           ) : (
             <div className="bad-time">时间格式无效，请检查 UTC 时间输入。</div>
+          )}
+
+          {activePlan && overviewFrame && plannedFovs.length > 0 && (
+            <section className="coverage-section">
+              <h2 className="view-label">覆盖规划总览（多片天区的大图规划）</h2>
+              <CoverageView
+                planName={activePlan.name}
+                fovs={plannedFovs}
+                coverage={coverageResult}
+                frame={overviewFrame}
+                magLimit={covMagLimit}
+                onChangeMag={setCovMagLimit}
+                selectedId={selectedId}
+                hoverId={hoverId}
+                onHover={setHoverId}
+                onFocusTarget={focusCoverageTarget}
+                onFocusFov={focusCoverageFov}
+              />
+            </section>
+          )}
+          {activePlan && plannedFovs.length === 0 && (
+            <section className="coverage-section">
+              <div className="cov-empty-plan">
+                规划「{activePlan.name}」还没有视场：在左侧已保存视场列表点「+规划」，把两片或更多天区加入规划。
+              </div>
+            </section>
           )}
         </main>
       </div>

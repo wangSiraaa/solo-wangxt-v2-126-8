@@ -94,6 +94,15 @@ export function buildProjection(kind: ProjectionKind, centerRa: number, centerDe
   };
 }
 
+/**
+ * 覆盖总览投影：等距方位投影，切点与球面裁剪角由球面包围球冠决定
+ * （见 coverage.coverageOverviewFrame）。投影只负责把球面几何画出来，
+ * 不参与任何覆盖判定；缩放画布/换投影都不会改变覆盖结果。
+ */
+export function buildOverviewProjection(centerRa: number, centerDec: number, clipRadiusDeg: number): BuiltProjection {
+  return buildProjection('equidistant', centerRa, centerDec, clipRadiusDeg);
+}
+
 /** 经纬网（D3 内置 10° 间隔），投影会做球面裁剪 */
 export function graticuleObject(): object {
   return geoGraticule10();
