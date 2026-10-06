@@ -7,9 +7,12 @@ import GlobeView from './components/GlobeView';
 import ProjectionView from './components/ProjectionView';
 import Controls from './components/Controls';
 import InfoPanel from './components/InfoPanel';
+import CoverageOverview from './components/CoverageOverview';
 import { SkyEpoch } from './lib/astronomy';
 import { computeSky, isTargetVisible, type SkyModel } from './lib/computeSky';
 import { fovBoundary } from './lib/geoMath';
+import { computeCoverage, nearestItem } from './lib/coverage';
+import { STAR_CATALOG } from './data/catalog';
 import {
   buildExportJson,
   buildStandaloneSvg,
@@ -17,10 +20,19 @@ import {
   downloadText,
   type ExportMeta
 } from './lib/exporter';
-import { deleteAnnotation, deleteFov, getAllAnnotations, getAllFovs, putAnnotation, putFov } from './lib/db';
+import {
+  deleteAnnotation,
+  deleteFov,
+  getAllAnnotations,
+  getAllFovs,
+  getCoveragePlan,
+  putAnnotation,
+  putCoveragePlan,
+  putFov
+} from './lib/db';
 import { DEMO_SCENARIOS } from './data/scenarios';
 import { OBSERVING_SITES } from './data/sites';
-import type { Annotation, FovConfig, SavedFov, SiteState } from './types';
+import type { Annotation, FovConfig, SavedFov, SiteState, CoveragePlan } from './types';
 
 const DEFAULT_SITE: SiteState = OBSERVING_SITES[0];
 const DEFAULT_TIME = '2026-09-30T13:00:00Z';
@@ -29,6 +41,8 @@ const DEFAULT_FOV: FovConfig = { centerRa: 213.9, centerDec: 19.2, radiusDeg: 30
 function uuid(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
 }
+
+const EMPTY_PLAN: CoveragePlan = { id: 'main', items: [], updatedAt: 0 };
 
 export default function App() {
   const [site, setSite] = useState<SiteState>(DEFAULT_SITE);
@@ -43,11 +57,17 @@ export default function App() {
   const [focusToken, setFocusToken] = useState<{ id: string; nonce: number } | null>(null);
   const [savedFovs, setSavedFovs] = useState<SavedFov[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [plan, setPlan] = useState<CoveragePlan>(EMPTY_PLAN);
 
   // 初始载入 IndexedDB
   useEffect(() => {
     getAllFovs().then(setSavedFovs).catch(() => undefined);
     getAllAnnotations().then(setAnnotations).catch(() => undefined);
+    getCoveragePlan()
+      .then((p) => {
+        if (p) setPlan(p);
+      })
+      .catch(() => undefined);
   }, []);
 
   // 历元（位置+时间）；SkyEpoch 内部调用 astronomy-engine 建旋转矩阵
@@ -118,6 +138,63 @@ export default function App() {
   };
   const removeAnnotation = (id: string) => deleteAnnotation(id).then(() => getAllAnnotations().then(setAnnotations));
 
+  // ---- 大图覆盖规划 ----
+  // 覆盖结果是纯球面计算（haversine 角距），与时间、台站、星等、投影、画布均无关。
+  const coverageResult = useMemo(() => computeCoverage(plan), [plan]);
+
+  const savePlan = (items: CoveragePlan['items']) => {
+    const next: CoveragePlan = { id: 'main', items, updatedAt: Date.now() };
+    setPlan(next);
+    putCoveragePlan(next).catch(() => undefined);
+  };
+
+  // 从已保存视场加入规划：复制视场几何快照；同一已保存视场不重复加入。
+  const addPlanItem = (f: SavedFov) => {
+    if (plan.items.some((it) => it.sourceFovUuid === f.uuid)) return;
+    savePlan([
+      ...plan.items,
+      {
+        itemId: uuid(),
+        sourceFovUuid: f.uuid,
+        name: f.name,
+        fov: { ...f.fov },
+        addedAt: Date.now()
+      }
+    ]);
+  };
+
+  // 移出规划项：只写 coverage 库，绝不触碰 fovs 与 annotations。
+  const removePlanItem = (itemId: string) => {
+    savePlan(plan.items.filter((it) => it.itemId !== itemId));
+  };
+
+  /** 把三视图切到某个规划视场快照并滚动到三视图区 */
+  const focusPlanItem = (itemId: string) => {
+    const item = plan.items.find((it) => it.itemId === itemId);
+    if (!item) return;
+    setFov({ ...item.fov });
+    document.getElementById('three-views')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  /**
+   * 总览中点击内置目标：回到相应视场的三视图并选中该目标。
+   * 指定 itemId 时进入该视场；否则取目标落入的首个视场；
+   * 目标未被任何视场覆盖时，进入球面上最近的规划视场。
+   */
+  const reviewTarget = (targetId: string, itemId?: string) => {
+    const star = STAR_CATALOG.find((s) => s.id === targetId);
+    if (!star) return;
+    let targetItem = itemId ? plan.items.find((it) => it.itemId === itemId) : undefined;
+    if (!targetItem) {
+      const cover = coverageResult.covers.find((c) => c.target.id === targetId);
+      targetItem = cover && cover.items.length > 0 ? cover.items[0] : nearestItem(star.ra, star.dec, plan)?.item;
+    }
+    if (targetItem) setFov({ ...targetItem.fov });
+    setSelectedId(targetId);
+    setFocusToken({ id: targetId, nonce: Date.now() });
+    document.getElementById('three-views')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   // 导出
   const exportMeta = (label: string): ExportMeta | null => {
     if (!sky) return null;
@@ -185,6 +262,7 @@ export default function App() {
             showGraticule={showGraticule}
             savedFovs={savedFovs}
             annotations={annotations}
+            plan={plan}
             onChangeSite={setSite}
             onChangeTime={setTimeIso}
             onChangeFov={setFov}
@@ -198,12 +276,28 @@ export default function App() {
             onDeleteFov={removeFov}
             onAddAnnotation={addAnnotation}
             onDeleteAnnotation={removeAnnotation}
+            onAddPlanItem={addPlanItem}
+            onRemovePlanItem={removePlanItem}
+            onReviewPlanItem={focusPlanItem}
           />
         </aside>
 
         <main className="content">
           {sky ? (
             <>
+              <section className="view-row cov-section">
+                <CoverageOverview
+                  plan={plan}
+                  result={coverageResult}
+                  selectedId={selectedId}
+                  hoverId={hoverId}
+                  onHover={setHoverId}
+                  onReviewTarget={reviewTarget}
+                  onReviewItem={focusPlanItem}
+                />
+              </section>
+
+              <div id="three-views">
               <section className="view-row globe-section">
                 <h2 className="view-label">球面视图 · 本地地平天球（Three.js）</h2>
                 <GlobeView
@@ -255,6 +349,7 @@ export default function App() {
                 gmstHours={sky.gmstHours}
                 julianDay={sky.julianDay}
               />
+              </div>
             </>
           ) : (
             <div className="bad-time">时间格式无效，请检查 UTC 时间输入。</div>

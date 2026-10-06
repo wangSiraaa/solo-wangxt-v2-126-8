@@ -37,3 +37,27 @@ export interface Annotation {
   text: string;
   color: string;
 }
+
+/**
+ * 覆盖规划项：从已保存视场中选出的一个范围。
+ * 保存视场几何【快照】而非只存引用——即使原已保存视场日后被删除，
+ * 规划本身的球面覆盖结果仍可复算；规划项增删也不触碰已保存视场与批注。
+ */
+export interface CoveragePlanItem {
+  /** 规划项自身 id（与来源视场 uuid 独立） */
+  itemId: string;
+  /** 来源已保存视场 uuid，仅用于溯源 */
+  sourceFovUuid: string;
+  /** 名称快照 */
+  name: string;
+  /** J2000 视场快照 */
+  fov: FovConfig;
+  addedAt: number;
+}
+
+/** 大图覆盖规划（当前只维护一份，固定 id），独立存于 IndexedDB */
+export interface CoveragePlan {
+  id: 'main';
+  items: CoveragePlanItem[];
+  updatedAt: number;
+}

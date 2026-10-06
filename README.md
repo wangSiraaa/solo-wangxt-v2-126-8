@@ -30,6 +30,9 @@ npm run preview    # 本地预览构建产物
 | 星等筛选与地平线裁切独立 | 两个独立开关；星等只作用于恒星，日月行星始终作为动态参考；地平以下恒星在关闭裁切时半透明显示 |
 | 极区 / 跨零 / 近地平星表样例 | "演示场景"三个一键预设；`data/catalog.ts` 星表带 `polar` / `zero-cross` / `bright` 标签 |
 | 两视图点击定位同一目标 | 任一视图点击 → 全局选中；三维视图飞行转向，两张投影图同步金色高亮 |
+| 大图覆盖规划 | 侧栏从**已保存视场**点 ＋ 选择多个范围（存视场快照于独立 `coverage` 库）；`CoverageOverview.tsx` 在一张全球面 Equal Earth 投影上叠加各视场边界，列出未覆盖 / 重复覆盖（≥2）的内置目标；点击总览中的目标 / 边界 / 色点回到相应视场三视图 |
+| 覆盖判定只按球面 | `lib/coverage.ts` 仅用 haversine 角距 ≤ 视场半径判定落入与重复覆盖，**不拼接投影图片、不使用像素边界**；结果与投影方式、画布缩放完全无关；跨零视场由经度差归算（-180,180] 与 d3 对跖子午线切割双重保证 |
+| 规划与视场库解耦 | 移除规划项只写 `coverage` 库，不删除 `fovs` 中的已保存视场，也不动 `annotations` 批注；删除已保存视场后规划快照仍可复算 |
 | 导出注明坐标系与时间基准 | SVG / PNG / JSON 三种导出；图注写明 J2000.0 平赤道坐标系、UTC 时间、JD(TT)、GMST、台站经纬度、星等与裁切设置、投影变形说明 |
 
 ## 内置演示场景
@@ -54,8 +57,9 @@ src/
   lib/computeSky.ts    合并目标、逐条转换、三条独立筛选
   lib/projections.ts   D3 两种投影构建、球面裁剪与比例尺标定
   lib/exporter.ts      独立 SVG / PNG / JSON 导出（含完整图注）
-  lib/db.ts            IndexedDB Promise 封装
-  components/          GlobeView / ProjectionView / Controls / InfoPanel
+  lib/db.ts            IndexedDB Promise 封装（fovs / annotations / coverage 三库独立）
+  lib/coverage.ts      覆盖规划纯球面计算（haversine 落入/重复覆盖，零像素依赖）
+  components/          GlobeView / ProjectionView / Controls / InfoPanel / CoverageOverview
 ```
 
 ## 图例
@@ -63,3 +67,4 @@ src/
 - 圆形＝恒星，方形＝行星，菱形＝太阳/月球；金色环＝选中，蓝色环＝悬停
 - 绿色圆＝视场边界（球面小圆），蓝色虚线环＝等角距参考环
 - 红色线＝地平圈，红色半透明区＝地平以下半球；N/E/S/W 为方位基点
+- 覆盖总览：灰点＝单次覆盖，黄点＝重复覆盖，红点＝未覆盖；彩色圆＝各规划视场（球面小圆叠加）

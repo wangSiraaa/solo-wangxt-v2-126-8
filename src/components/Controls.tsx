@@ -1,10 +1,12 @@
 // 控制面板：观测位置/时间、视场中心与角半径、星等与地平线独立筛选、
-// 演示场景、视场与批注的 IndexedDB 存取。
+// 演示场景、视场与批注的 IndexedDB 存取、大图覆盖规划项的增删。
 
 import { useState } from 'react';
 import { OBSERVING_SITES } from '../data/sites';
 import { DEMO_SCENARIOS } from '../data/scenarios';
-import type { FovConfig, SavedFov, Annotation, SiteState } from '../types';
+import { planColor } from '../lib/coverage';
+import { formatDec, formatRA } from '../lib/geoMath';
+import type { FovConfig, SavedFov, Annotation, SiteState, CoveragePlan } from '../types';
 
 interface ControlsProps {
   site: SiteState;
@@ -16,6 +18,7 @@ interface ControlsProps {
   showGraticule: boolean;
   savedFovs: SavedFov[];
   annotations: Annotation[];
+  plan: CoveragePlan;
   onChangeSite: (site: SiteState) => void;
   onChangeTime: (iso: string) => void;
   onChangeFov: (fov: FovConfig) => void;
@@ -29,6 +32,9 @@ interface ControlsProps {
   onDeleteFov: (uuid: string) => void;
   onAddAnnotation: (text: string, color: string) => void;
   onDeleteAnnotation: (uuid: string) => void;
+  onAddPlanItem: (fov: SavedFov) => void;
+  onRemovePlanItem: (itemId: string) => void;
+  onReviewPlanItem: (itemId: string) => void;
 }
 
 export default function Controls(p: ControlsProps) {
@@ -118,15 +124,59 @@ export default function Controls(p: ControlsProps) {
         </div>
         {p.savedFovs.length > 0 && (
           <ul className="store-list">
-            {p.savedFovs.slice(0, 6).map((f) => (
-              <li key={f.uuid}>
-                <button className="link-btn" title={`RA ${f.fov.centerRa.toFixed(1)}° Dec ${f.fov.centerDec.toFixed(1)}° r ${f.fov.radiusDeg}°`} onClick={() => p.onLoadFov(f)}>
-                  {f.name}
+            {p.savedFovs.map((f) => {
+              const inPlan = p.plan.items.some((it) => it.sourceFovUuid === f.uuid);
+              return (
+                <li key={f.uuid}>
+                  <button className="link-btn" title={`RA ${f.fov.centerRa.toFixed(1)}° Dec ${f.fov.centerDec.toFixed(1)}° r ${f.fov.radiusDeg}°`} onClick={() => p.onLoadFov(f)}>
+                    {f.name}
+                  </button>
+                  <button
+                    className="plus-btn"
+                    disabled={inPlan}
+                    title={inPlan ? '已在覆盖规划中' : '加入大图覆盖规划（不影响原视场）'}
+                    onClick={() => p.onAddPlanItem(f)}
+                  >
+                    ＋
+                  </button>
+                  <button className="x-btn" title="删除已保存视场（不影响覆盖规划中的快照）" onClick={() => p.onDeleteFov(f.uuid)}>×</button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      <section className="ctl-block">
+        <h3>大图覆盖规划（多视场拼合，球面判定）</h3>
+        <p className="hint">
+          从上方已保存视场点 ＋ 选择多个范围；系统在球面上计算每个内置目标落入哪些视场及重复覆盖，
+          不拼接投影图片、不使用像素边界。
+        </p>
+        {p.plan.items.length > 0 ? (
+          <ul className="store-list plan-list">
+            {p.plan.items.map((it, i) => (
+              <li key={it.itemId}>
+                <span className="dot" style={{ background: planColor(i) }} />
+                <button
+                  className="link-btn"
+                  title={`${formatRA(it.fov.centerRa)} / ${formatDec(it.fov.centerDec)} · 角半径 ${it.fov.radiusDeg}°\n点击回到该视场三视图`}
+                  onClick={() => p.onReviewPlanItem(it.itemId)}
+                >
+                  {it.name}
+                  <small>
+                    {' '}
+                    r{it.fov.radiusDeg}°
+                  </small>
                 </button>
-                <button className="x-btn" onClick={() => p.onDeleteFov(f.uuid)}>×</button>
+                <button className="x-btn" title="移出规划（不删除已保存视场与批注）" onClick={() => p.onRemovePlanItem(it.itemId)}>
+                  ×
+                </button>
               </li>
             ))}
           </ul>
+        ) : (
+          <p className="hint">尚无规划项。</p>
         )}
       </section>
 
